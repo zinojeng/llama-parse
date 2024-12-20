@@ -8,22 +8,89 @@ from llama_index.core import VectorStoreIndex
 from llama_index.core.retrievers import VectorIndexRetriever
 from llama_index.core.query_engine import RetrieverQueryEngine
 from llama_index.core.prompts import PromptTemplate
+from llama_index.core import Settings
+from llama_index.llms.openai import OpenAI
 
 # 載入環境變數
 load_dotenv()
-os.environ['OPENAI_API_KEY'] = os.getenv('OPENAI_API_KEY')
-os.environ['LLAMA_CLOUD_API_KEY'] = os.getenv('LLAMA_CLOUD_API_KEY')
+api_key = os.getenv('OPENAI_API_KEY')
+if not api_key:
+    raise ValueError("Missing OpenAI API key")
+
+# 設置 LLM
+llm = OpenAI(
+    api_key=api_key,
+    model="gpt-4o-mini",
+    temperature=0.2,
+    max_tokens=10240,
+)
+
+# 更新全局設置
+Settings.llm = llm
 
 # 定義詳細回答的提示模板
 DETAILED_RESPONSE_PROMPT = PromptTemplate(
-    """Please provide a detailed and comprehensive answer based on the given context. 
-    organize the information in a structured way.
+    """You are a medical expert tasked with providing extremely detailed, comprehensive, and well-researched answers.
+    Your response MUST follow this precise structure and requirements:
+
+    1. EXECUTIVE SUMMARY (執行摘要):
+       - Provide a clear, concise overview of key points
+       - Highlight critical findings and recommendations
+       - Define the scope and context of the answer
+
+    2. BACKGROUND CONTEXT (背景脈絡):
+       - Explain relevant medical/scientific background
+       - Define ALL technical terms and medical jargon
+       - Provide historical context or development if relevant
+
+    3. DETAILED ANALYSIS (詳細分析):
+       - Break down EACH major point with thorough explanations
+       - Support claims with specific data, statistics, and research findings
+       - Include multiple real-world examples and case studies
+       - Explain the significance and implications of each point
+       - Address potential limitations or contradictions
+       - Discuss alternative viewpoints or approaches
+
+    4. EVIDENCE-BASED SUPPORT (實證依據):
+       - Cite specific guidelines, standards, or protocols
+       - Reference relevant clinical studies or research
+       - Include statistical data with proper context
+       - Discuss the quality and reliability of evidence
+       - Address any gaps or uncertainties in current knowledge
+
+    5. PRACTICAL APPLICATIONS (實務應用):
+       - Provide detailed implementation guidelines
+       - Discuss real-world considerations and challenges
+       - Include step-by-step procedures when applicable
+       - Address common questions or concerns
+       - Offer specific recommendations for different scenarios
+
+    6. RISK ASSESSMENT (風險評估):
+       - Identify potential risks and complications
+       - Discuss contraindications and precautions
+       - Provide risk mitigation strategies
+       - Address safety considerations
+
+    7. KEY TAKEAWAYS AND RECOMMENDATIONS (重要結論):
+       - Summarize critical points and findings
+       - Provide clear, actionable recommendations
+       - Highlight priority areas for attention
+       - Suggest next steps or follow-up actions
 
     Context: {context}
     Question: {query}
 
-    Please provide a detailed answer that Directly addresses the question
-
+    Requirements for your answer:
+    - Must be extremely comprehensive and detailed
+    - Must explain ALL technical terms and medical concepts
+    - Must provide specific examples and case studies
+    - Must include relevant statistics and research data
+    - Must address potential counterarguments or limitations
+    - Must be evidence-based and well-supported
+    - Must be practical and applicable
+    - Must consider different scenarios and conditions
+    - Must maintain logical flow and clear structure
+    
     Detailed Answer:"""
 )
 
@@ -115,7 +182,7 @@ def parse_pdfs_to_file(output_format='.md'):
                         print("\n⚠️ 已達到每日解析頁數限制")
                         print("建議：")
                         print("1. 等待24小時後再繼續")
-                        print("2. 聯繫 LlamaParse 支援增加限制")
+                        print("2. 聯繫 LlamaParse 支援增加限")
                         break
                     else:
                         print(f"❌ 處理失敗：{pdf_file.name}")
@@ -155,20 +222,91 @@ def create_nodes_from_markdown(markdown_files):
 
 def create_index_and_query_engine(nodes):
     """創建索引和查詢引擎"""
-    index = VectorStoreIndex(nodes)
-    retriever = VectorIndexRetriever(
-        index=index,
-        similarity_top_k=5  # 增加相關文檔數量
+    # 使用更好的索引設置
+    index = VectorStoreIndex(
+        nodes,
+        similarity_top_k=15,  # 增加相關文檔數量
     )
     
-    # 使用自定義提示模板創建查詢引擎
+    # 改進檢索器設置
+    retriever = VectorIndexRetriever(
+        index=index,
+        similarity_top_k=15,  # 增加檢索數量
+        filter_similarity_threshold=0.7,  # 提高相似度要求
+        query_mode="hybrid"  # 使用混合查詢模式
+    )
+    
+    # 調整查詢引擎參數
     query_engine = RetrieverQueryEngine.from_args(
         retriever=retriever,
         text_qa_template=DETAILED_RESPONSE_PROMPT,
-        response_mode="tree_summarize"  # 使用樹狀結構來織回答
+        response_mode="tree_summarize",  # 使用樹狀摘要模式
+        response_kwargs={
+            "max_tokens": 10240,
+            "temperature": 0.1,
+        },
+        node_postprocessors=[],
+        verbose=True
     )
     
     return query_engine
+
+def process_query_response(response, show_sources=True):
+    """處理查詢回應並確保相關性"""
+    if isinstance(response, str):
+        print("\n=== 系統訊息 ===")
+        print(response)
+        return
+        
+    print("\n=== 詳細回答 ===")
+    print(response.response)
+    
+    if show_sources and hasattr(response, 'source_nodes'):
+        print("\n=== 參考來源摘要 ===")
+        print(f"找到 {len(response.source_nodes)} 個相關文件段落")
+        
+        for i, node in enumerate(response.source_nodes, 1):
+            print(f"\n來源 {i}:")
+            print(f"文件: {node.metadata.get('source', '未知')}")
+            print(f"相關度: {node.score if hasattr(node, 'score') else '未知'}")
+            
+            # 顯示內容摘要
+            text = node.text.strip()
+            paragraphs = text.split('\n')
+            print("相關內容:")
+            for p in paragraphs[:2]:  # 顯示前兩段
+                if p.strip():
+                    print(f"- {p}")
+
+def process_query(query_engine, query):
+    """處理查詢並確保回答完整性和相關性"""
+    # 構建更具體的查詢
+    enhanced_query = f"""Based on the provided medical documents and guidelines, please answer this specific question:
+    
+    QUESTION: {query}
+    
+    IMPORTANT REQUIREMENTS:
+    1. Only use information directly from the provided medical documents
+    2. Focus on the most relevant sections and guidelines
+    3. If the answer cannot be found in the documents, clearly state this
+    4. Cite specific sections or guidelines when possible
+    5. Follow the structured format exactly
+    
+    Please ensure all information comes from the provided context and is directly relevant to the question.
+    """
+    
+    try:
+        # 執行查詢
+        response = query_engine.query(enhanced_query)
+        
+        # 檢查回應相關性
+        if not response.source_nodes:
+            return "無法找到相關資訊。請嘗試重新表述您的問題，或確認問題是否在文件範圍內。"
+            
+        return response
+    except Exception as e:
+        print(f"查詢處理時發生錯誤: {str(e)}")
+        return None
 
 def main():
     try:
@@ -198,9 +336,9 @@ def main():
                 nodes = create_nodes_from_markdown(output_files)  # 函數名稱保持不變，但可處理兩種格式
                 print(f"創建了 {len(nodes)} 個節點")
                 
-                print("\n=== 創建查詢引擎 ===")
+                print("\n=== 創查詢引擎 ===")
                 query_engine = create_index_and_query_engine(nodes)
-                print("查詢引擎準備完成")
+                print("詢引擎準備完成")
                 
                 print("\n=== 開始查詢 ===")
                 print("輸入 'exit' 返回主選單")
@@ -211,20 +349,18 @@ def main():
                 print("- 可以要求提供例子")
                 
                 while True:
-                    query = input("\n請輸入問題: ")
+                    query = input("\n請輸入問題 (輸入 'exit' 返回主選單): ")
                     if query.lower() == 'exit':
                         break
                     
-                    response = query_engine.query(query)
-                    print("\n詳細回答:", response.response)
+                    print("\n正在處理查詢...")
+                    # 使用新的查詢處理函數
+                    response = process_query(query_engine, query)
+                    process_query_response(response)
                     
-                    print("\n參考來源:")
-                    for i, node in enumerate(response.source_nodes, 1):
-                        print(f"\n--- 來源 {i} ---")
-                        print(f"文件: {node.metadata.get('source', 'unknown')}")
-                        print(f"段落: {node.metadata.get('section', 'unknown')}")
-                        print("內容摘錄:")
-                        print(node.text[:300] + "..." if len(node.text) > 300 else node.text)
+                    # 詢問是否繼續查詢
+                    if input("\n是否繼續查詢？(y/n): ").lower() != 'y':
+                        break
             
             except KeyboardInterrupt:
                 print("\n\n已中斷操作")
